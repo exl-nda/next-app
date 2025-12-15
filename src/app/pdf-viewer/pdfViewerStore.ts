@@ -26,25 +26,73 @@ class PdfViewerStore {
     currentMatchIndex: number | null = null;
 
     constructor() {
-        makeAutoObservable(this, {}, { autoBind: true });
+        makeAutoObservable(this);
     }
 
     get totalMatches(): number {
         return Object.values(this.pageMatches).reduce((sum, v) => sum + v, 0);
     }
 
-    initialiseFromLocation() {
+    setIsLoading = (value: boolean) => {
+        this.isLoading = value;
+    };
+
+    setPdfUrl = (value: string) => {
+        this.pdfUrl = value;
+    };
+
+    setFileData = (value: string | null) => {
+        this.fileData = value;
+    };
+
+    setNumPages = (value: number | null) => {
+        this.numPages = value;
+    };
+
+    setError = (message: string | null) => {
+        this.error = message;
+    };
+
+    setSubmittedSearchTerm = (value: string) => {
+        this.submittedSearchTerm = value;
+    };
+
+    setPageMatches = (value: Record<number, number>) => {
+        this.pageMatches = value;
+    };
+
+    setPageTexts = (value: Record<number, string[]>) => {
+        this.pageTexts = value;
+    };
+
+    setPageJoinedTexts = (value: Record<number, string>) => {
+        this.pageJoinedTexts = value;
+    };
+
+    setPageMatchRanges = (value: Record<number, MatchRange[]>) => {
+        this.pageMatchRanges = value;
+    };
+
+    setPageTextItemRanges = (value: Record<number, ItemRange[]>) => {
+        this.pageTextItemRanges = value;
+    };
+
+    setCurrentMatchIndex = (value: number | null) => {
+        this.currentMatchIndex = value;
+    };
+
+    initialiseFromLocation = () => {
         const url = new URL(window.location.href);
         const urlParam = url.searchParams.get("url");
         const finalUrl = urlParam || DEFAULT_PDF_URL;
-        this.pdfUrl = finalUrl;
+        this.setPdfUrl(finalUrl);
         this.fetchPdf(finalUrl);
-    }
+    };
 
-    async fetchPdf(finalUrl: string) {
+    fetchPdf = async (finalUrl: string) => {
         try {
-            this.isLoading = true;
-            this.error = null;
+            this.setIsLoading(true);
+            this.setError(null);
 
             const response = await fetch(finalUrl);
             if (!response.ok) {
@@ -57,38 +105,39 @@ class PdfViewerStore {
             reader.onloadend = () => {
                 const result = reader.result;
                 if (typeof result === "string") {
-                    this.fileData = result;
+                    this.setFileData(result);
                 } else {
-                    this.error = "Unable to read PDF file.";
+                    this.setError("Unable to read PDF file.");
                 }
-                this.isLoading = false;
+                this.setIsLoading(false);
             };
 
             reader.onerror = () => {
-                this.isLoading = false;
-                this.error = "Error reading PDF file.";
+                this.setIsLoading(false);
+                this.setError("Error reading PDF file.");
             };
 
             reader.readAsDataURL(blob);
         } catch (err) {
             console.error(err);
-            this.isLoading = false;
-            this.error =
-                err instanceof Error ? err.message : "Unknown error downloading PDF.";
+            this.setIsLoading(false);
+            this.setError(
+                err instanceof Error ? err.message : "Unknown error downloading PDF.",
+            );
         }
-    }
+    };
 
-    handleDocumentLoadSuccess({ numPages }: { numPages: number }) {
-        this.numPages = numPages;
-        this.pageMatches = {};
-        this.pageTexts = {};
-        this.pageJoinedTexts = {};
-        this.pageMatchRanges = {};
-        this.pageTextItemRanges = {};
-        this.currentMatchIndex = null;
-    }
+    handleDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
+        this.setNumPages(numPages);
+        this.setPageMatches({});
+        this.setPageTexts({});
+        this.setPageJoinedTexts({});
+        this.setPageMatchRanges({});
+        this.setPageTextItemRanges({});
+        this.setCurrentMatchIndex(null);
+    };
 
-    handlePageTextSuccess(pageNumber: number, items: any) {
+    handlePageTextSuccess = (pageNumber: number, items: any) => {
         const rawItems = Array.isArray(items) ? items : items?.items;
 
         if (!Array.isArray(rawItems)) {
@@ -116,30 +165,30 @@ class PdfViewerStore {
 
         const joinedText = joinedParts.join(" ");
 
-        this.pageTexts = {
+        this.setPageTexts({
             ...this.pageTexts,
             [pageNumber]: textArray,
-        };
+        });
 
-        this.pageJoinedTexts = {
+        this.setPageJoinedTexts({
             ...this.pageJoinedTexts,
             [pageNumber]: joinedText,
-        };
+        });
 
-        this.pageTextItemRanges = {
+        this.setPageTextItemRanges({
             ...this.pageTextItemRanges,
             [pageNumber]: itemRanges,
-        };
+        });
 
         this.recomputeMatches();
-    }
+    };
 
-    private recomputeMatches() {
+    private recomputeMatches = () => {
         const term = this.submittedSearchTerm.trim();
         if (!term) {
-            this.pageMatches = {};
-            this.pageMatchRanges = {};
-            this.currentMatchIndex = null;
+            this.setPageMatches({});
+            this.setPageMatchRanges({});
+            this.setCurrentMatchIndex(null);
             return;
         }
 
@@ -164,14 +213,14 @@ class PdfViewerStore {
             newMatchRanges[pageNumber] = matches;
         });
 
-        this.pageMatches = newMatches;
-        this.pageMatchRanges = newMatchRanges;
+        this.setPageMatches(newMatches);
+        this.setPageMatchRanges(newMatchRanges);
         this.ensureCurrentMatchInRange();
-    }
+    };
 
-    private ensureCurrentMatchInRange() {
+    private ensureCurrentMatchInRange = () => {
         if (!this.submittedSearchTerm.trim() || this.totalMatches === 0) {
-            this.currentMatchIndex = null;
+            this.setCurrentMatchIndex(null);
             return;
         }
 
@@ -180,53 +229,52 @@ class PdfViewerStore {
             this.currentMatchIndex < 0 ||
             this.currentMatchIndex >= this.totalMatches
         ) {
-            this.currentMatchIndex = 0;
+            this.setCurrentMatchIndex(0);
         }
-    }
+    };
 
-    setSearchTerm(value: string) {
+    setSearchTerm = (value: string) => {
         this.searchTerm = value;
-        this.submittedSearchTerm = value;
+        this.setSubmittedSearchTerm(value);
         this.recomputeMatches();
-    }
+    };
 
-    submitSearch() {
-        this.submittedSearchTerm = this.searchTerm;
+    submitSearch = () => {
+        this.setSubmittedSearchTerm(this.searchTerm);
         this.recomputeMatches();
-    }
+    };
 
-    clearSearch() {
-        this.searchTerm = "";
-        this.submittedSearchTerm = "";
-        this.pageMatches = {};
-        this.pageMatchRanges = {};
-        this.currentMatchIndex = null;
-    }
+    clearSearch = () => {
+        this.setSearchTerm("");
+        this.setSubmittedSearchTerm("");
+        this.setPageMatches({});
+        this.setPageMatchRanges({});
+        this.setCurrentMatchIndex(null);
+    };
 
-    nextMatch() {
+    nextMatch = () => {
         if (!this.totalMatches) return;
         if (this.currentMatchIndex === null) {
-            this.currentMatchIndex = 0;
+            this.setCurrentMatchIndex(0);
             return;
         }
-        this.currentMatchIndex = (this.currentMatchIndex + 1) % this.totalMatches;
-    }
+        this.setCurrentMatchIndex(
+            (this.currentMatchIndex + 1) % this.totalMatches,
+        );
+    };
 
-    prevMatch() {
+    prevMatch = () => {
         if (!this.totalMatches) return;
         if (this.currentMatchIndex === null) {
-            this.currentMatchIndex = this.totalMatches - 1;
+            this.setCurrentMatchIndex(this.totalMatches - 1);
             return;
         }
-        this.currentMatchIndex =
-            (this.currentMatchIndex - 1 + this.totalMatches) % this.totalMatches;
-    }
+        this.setCurrentMatchIndex(
+            (this.currentMatchIndex - 1 + this.totalMatches) % this.totalMatches,
+        );
+    };
 
-    setError(message: string | null) {
-        this.error = message;
-    }
-
-    scrollCurrentMatchIntoView(container: HTMLDivElement | null) {
+    scrollCurrentMatchIntoView = (container: HTMLDivElement | null) => {
         if (this.currentMatchIndex === null || this.totalMatches === 0) return;
         if (!container) return;
 
@@ -242,7 +290,7 @@ class PdfViewerStore {
                 block: "center",
             });
         }, 50);
-    }
+    };
 }
 
 export const pdfViewerStore = new PdfViewerStore();
