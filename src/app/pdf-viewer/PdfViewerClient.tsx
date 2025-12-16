@@ -1,14 +1,12 @@
 "use client";
 
-/* eslint-disable @typescript-eslint/no-floating-promises */
-
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react-lite";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
-
-import { pdfViewerStore } from "./pdfViewerStore";
+import { PdfViewerToolbar } from "./PdfViewerToolbar";
+import { usePdfViewerStore } from "@/stores/RootStoreProvider";
 
 // Configure pdfjs worker (required by react-pdf)
 if (typeof window !== "undefined") {
@@ -16,18 +14,56 @@ if (typeof window !== "undefined") {
     pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 }
 
-const PdfViewerClient = observer(function PdfViewerClient() {
+type Props = {
+    file: string;
+};
+
+function PdfViewer({ file }: Props) {
+    const {
+        isLoading,
+        error,
+        fileData,
+        scale,
+        currentPage,
+        currentMatchIndex,
+        totalMatches,
+        submittedSearchTerm,
+        pageTextItemRanges,
+        pageMatchRanges,
+        pageMatches,
+        fetchPdf,
+        handleDocumentLoadSuccess,
+        scrollCurrentMatchIntoView,
+        setError,
+        handlePageTextSuccess,
+    } = usePdfViewerStore();
+
     const viewerRef = useRef<HTMLDivElement | null>(null);
+
+    const [pageWidth, setPageWidth] = useState<number | undefined>(600);
 
     // Initialise store and start fetching PDF based on URL
     useEffect(() => {
-        pdfViewerStore.initialiseFromLocation();
+        fetchPdf(file);
+    }, []);
+
+    // Auto-fit width when container resizes
+    useEffect(() => {
+        const el = viewerRef.current;
+        if (!el) return;
+        const observer = new ResizeObserver(() => {
+            const w = el.clientWidth;
+            // Provide some padding margin
+            setPageWidth(Math.max(300, Math.min(w - 32, 800)));
+        });
+        observer.observe(el);
+        return () => observer.disconnect();
     }, []);
 
     // Scroll the current match into view inside the PDF container when it changes
     useEffect(() => {
-        pdfViewerStore.scrollCurrentMatchIntoView(viewerRef.current);
-    }, [pdfViewerStore.currentMatchIndex, pdfViewerStore.totalMatches]);
+        scrollCurrentMatchIntoView(viewerRef.current);
+    }, [currentMatchIndex, totalMatches, currentPage]);
 
     // Note: this stays in the React component (and not in the MobX store)
     // because it is a pure view concern, tightly coupled to react-pdf's
@@ -43,14 +79,14 @@ const PdfViewerClient = observer(function PdfViewerClient() {
         let itemIndex = 0;
 
         return ({ str }: { str: string }) => {
-            const term = pdfViewerStore.submittedSearchTerm.trim();
+            const term = submittedSearchTerm.trim();
             if (!term) {
                 itemIndex++;
                 return str;
             }
 
-            const itemRanges = pdfViewerStore.pageTextItemRanges[pageNumber] || [];
-            const matchRanges = pdfViewerStore.pageMatchRanges[pageNumber] || [];
+            const itemRanges = pageTextItemRanges[pageNumber] || [];
+            const matchRanges = pageMatchRanges[pageNumber] || [];
             const currentItemRange = itemRanges[itemIndex];
 
             if (!currentItemRange) {
@@ -68,7 +104,7 @@ const PdfViewerClient = observer(function PdfViewerClient() {
 
             let matchCounter = 0;
             for (let p = 1; p < pageNumber; p++) {
-                matchCounter += pdfViewerStore.pageMatches[p] || 0;
+                matchCounter += pageMatches[p] || 0;
             }
 
             matchRanges.forEach((matchRange, idx) => {
@@ -114,7 +150,7 @@ const PdfViewerClient = observer(function PdfViewerClient() {
                 }
 
                 const matchText = str.substring(match.localStart, match.localEnd);
-                const isCurrent = pdfViewerStore.currentMatchIndex === match.globalIndex;
+                const isCurrent = currentMatchIndex === match.globalIndex;
                 const baseStyle = "color: black;";
                 const bgStyle = isCurrent
                     ? "background-color: #3b82f6; color: white;"
@@ -136,142 +172,59 @@ const PdfViewerClient = observer(function PdfViewerClient() {
     return (
         <div className="flex min-h-screen flex-col bg-zinc-50 px-4 py-6 text-zinc-900">
             <header className="sticky top-0 z-10 mx-auto flex w-full max-w-4xl flex-col gap-2 border-b border-zinc-200 bg-zinc-50 pb-4">
-                <h1 className="text-xl font-semibold">PDF Viewer</h1>
-                <p className="text-sm text-zinc-600">Downloading and displaying PDF from:</p>
-                <code className="break-all rounded bg-zinc-100 px-2 py-1 text-xs text-zinc-700">
-                    {pdfViewerStore.pdfUrl}
-                </code>
-                <p className="text-xs text-zinc-500">
-                    You can change the PDF by opening{" "}
-                    <span className="font-mono">/pdf-viewer?url=&lt;PDF_URL&gt;</span>.
-                </p>
-
-                <form
-                    onSubmit={(e) => {
-                        e.preventDefault();
-                        pdfViewerStore.submitSearch();
-                    }}
-                    className="mt-3 flex flex-wrap items-center gap-2"
-                >
-                    <input
-                        type="text"
-                        value={pdfViewerStore.searchTerm}
-                        onChange={(e) => {
-                            const value = e.target.value;
-                            pdfViewerStore.setSearchTerm(value);
-                        }}
-                        placeholder="Search in PDF text…"
-                        className="min-w-0 flex-1 rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-zinc-500 focus:ring-1 focus:ring-zinc-500"
-                    />
-                    <button
-                        type="submit"
-                        className="rounded bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
-                        disabled={!pdfViewerStore.searchTerm.trim()}
-                    >
-                        Search
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => pdfViewerStore.clearSearch()}
-                        className="rounded border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100"
-                    >
-                        Clear
-                    </button>
-                </form>
-
-                <div className="mt-1 flex items-center gap-2 text-xs text-zinc-600">
-                    <div>
-                        Matches in document:{" "}
-                        <span className="font-semibold">{pdfViewerStore.totalMatches}</span>
-                        {pdfViewerStore.numPages
-                            ? ` across ${pdfViewerStore.numPages} page(s)`
-                            : ""}
-                    </div>
-                    <div className="ml-auto flex items-center gap-2">
-                        {pdfViewerStore.totalMatches > 0 &&
-                            pdfViewerStore.currentMatchIndex !== null && (
-                                <span className="text-[11px] text-zinc-700">
-                                    <span className="font-semibold">
-                                        {pdfViewerStore.currentMatchIndex + 1}
-                                    </span>{" "}
-                                    / {pdfViewerStore.totalMatches}
-                                </span>
-                            )}
-                        <button
-                            type="button"
-                            onClick={() => pdfViewerStore.prevMatch()}
-                            disabled={pdfViewerStore.totalMatches === 0}
-                            className="rounded border border-zinc-300 px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
-                        >
-                            Prev
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => pdfViewerStore.nextMatch()}
-                            disabled={pdfViewerStore.totalMatches === 0}
-                            className="rounded border border-zinc-300 px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
-                        >
-                            Next
-                        </button>
-                    </div>
-                </div>
+                <PdfViewerToolbar />
             </header>
 
+
             <main className="mx-auto mt-4 flex w-full max-w-4xl flex-1 flex-col items-center justify-start gap-4">
-                {pdfViewerStore.isLoading && (
-                    <div className="mt-8 text-sm text-zinc-600">Downloading PDF…</div>
+                {isLoading && (
+                    <p>Loading...</p>
                 )}
 
-                {pdfViewerStore.error && (
+                {error && (
                     <div className="mt-8 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                         <p className="font-medium">Error</p>
-                        <p>{pdfViewerStore.error}</p>
+                        <p>{error}</p>
                     </div>
                 )}
 
-                {pdfViewerStore.fileData && (
+                {fileData && (
                     <div
                         ref={viewerRef}
-                        className="mt-4 w-full max-w-3xl max-h-[calc(100vh-220px)] overflow-auto rounded border border-zinc-200 bg-white p-3 shadow-sm"
+                        className="mt-4 w-full max-w-3xl overflow-auto rounded border border-zinc-200 bg-white p-3 shadow-sm"
                     >
                         <Document
-                            file={pdfViewerStore.fileData}
-                            onLoadSuccess={pdfViewerStore.handleDocumentLoadSuccess}
+                            file={fileData}
+                            onLoadSuccess={handleDocumentLoadSuccess}
                             onLoadError={(err) => {
                                 console.error(err);
-                                pdfViewerStore.setError(
+                                setError(
                                     err instanceof Error
                                         ? err.message
                                         : "Error loading PDF for display.",
                                 );
                             }}
                         >
-                            {Array.from(
-                                new Array(pdfViewerStore.numPages || 0),
-                                (_el, index) => {
-                                    const pageNum = index + 1;
-                                    return (
-                                        <Page
-                                            key={`page_${pageNum}-${pdfViewerStore.submittedSearchTerm}`}
-                                            pageNumber={pageNum}
-                                            width={800}
-                                            customTextRenderer={createTextRenderer(pageNum)}
-                                            onGetTextSuccess={(items) =>
-                                                pdfViewerStore.handlePageTextSuccess(
-                                                    pageNum,
-                                                    items,
-                                                )
-                                            }
-                                        />
-                                    );
-                                },
-                            )}
+                            <Page
+                                key={`page_${currentPage}-${submittedSearchTerm}`}
+                                pageNumber={currentPage}
+                                width={pageWidth}
+                                scale={scale}
+                                customTextRenderer={createTextRenderer(currentPage)}
+                                onGetTextSuccess={(items) =>
+                                    handlePageTextSuccess(
+                                        currentPage,
+                                        items,
+                                    )
+                                }
+                            />
+
                         </Document>
                     </div>
                 )}
             </main>
         </div>
     );
-});
+};
 
-export default PdfViewerClient;
+export default observer(PdfViewer);

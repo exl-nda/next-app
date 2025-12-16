@@ -1,6 +1,6 @@
 import { makeAutoObservable } from "mobx";
-
-const DEFAULT_PDF_URL = "https://pdfobject.com/pdf/sample.pdf";
+// import { BridgeRootStore } from "../BridgeRootStore";
+import * as pdfjsLib from "pdfjs-dist";
 
 type MatchRange = { start: number; end: number };
 type ItemRange = { start: number; end: number };
@@ -9,12 +9,17 @@ const escapeRegex = (value: string) => {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 };
 
-class PdfViewerStore {
-    pdfUrl = DEFAULT_PDF_URL;
-    fileData: string | null = null;
-    numPages: number | null = null;
+export class PdfViewerStore {
+    // root: BridgeRootStore;
     isLoading = false;
     error: string | null = null;
+
+    fileData: string | null = null;
+
+    totalDocumentPages: number | null = null;
+    currentPage = 1;
+
+    scale = 1.0;
 
     searchTerm = "";
     submittedSearchTerm = "";
@@ -24,11 +29,23 @@ class PdfViewerStore {
     pageMatchRanges: Record<number, MatchRange[]> = {};
     pageTextItemRanges: Record<number, ItemRange[]> = {};
     currentMatchIndex: number | null = null;
+    isProcessingAllPages = false;
 
     constructor() {
+        // this.root = root;
         makeAutoObservable(this);
     }
 
+    get pageNumbersOptions() {
+        const total = this.totalDocumentPages ?? 0;
+        if (total <= 0) return [];
+
+        return Array.from({ length: total }, (_, i) => {
+            const num = i + 1;
+            const str = num.toString();
+            return { id: str, value: str, label: str };
+        });
+    }
     get totalMatches(): number {
         return Object.values(this.pageMatches).reduce((sum, v) => sum + v, 0);
     }
@@ -37,20 +54,25 @@ class PdfViewerStore {
         this.isLoading = value;
     };
 
-    setPdfUrl = (value: string) => {
-        this.pdfUrl = value;
-    };
-
     setFileData = (value: string | null) => {
         this.fileData = value;
     };
 
-    setNumPages = (value: number | null) => {
-        this.numPages = value;
-    };
+
 
     setError = (message: string | null) => {
         this.error = message;
+    };
+
+    setTotalDocumentPages = (totalPages: number) => {
+        this.totalDocumentPages = totalPages;
+    };
+
+    setCurrentPage = (page: number) => {
+        this.currentPage = page;
+    };
+    setScale = (scale: number) => {
+        this.scale = scale;
     };
 
     setSubmittedSearchTerm = (value: string) => {
@@ -81,22 +103,18 @@ class PdfViewerStore {
         this.currentMatchIndex = value;
     };
 
-    initialiseFromLocation = () => {
-        const url = new URL(window.location.href);
-        const urlParam = url.searchParams.get("url");
-        const finalUrl = urlParam || DEFAULT_PDF_URL;
-        this.setPdfUrl(finalUrl);
-        this.fetchPdf(finalUrl);
-    };
-
     fetchPdf = async (finalUrl: string) => {
         try {
             this.setIsLoading(true);
             this.setError(null);
 
-            const response = await fetch(finalUrl);
+            // Use API route to proxy the request and avoid CORS issues
+            const proxyUrl = `/api/pdf-proxy?url=${encodeURIComponent(finalUrl)}`;
+            const response = await fetch(proxyUrl);
             if (!response.ok) {
-                throw new Error(`Failed to download PDF (status ${response.status})`);
+                const errorData = await response.json().catch(() => null);
+                const errorMessage = errorData?.error || `Failed to download PDF (status ${response.status})`;
+                throw new Error(errorMessage);
             }
 
             const blob = await response.blob();
@@ -128,7 +146,7 @@ class PdfViewerStore {
     };
 
     handleDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
-        this.setNumPages(numPages);
+        this.setTotalDocumentPages(numPages);
         this.setPageMatches({});
         this.setPageTexts({});
         this.setPageJoinedTexts({});
@@ -180,7 +198,11 @@ class PdfViewerStore {
             [pageNumber]: itemRanges,
         });
 
-        this.recomputeMatches();
+        // Only recompute if we're not processing all pages in background
+        // (to avoid duplicate work and incremental updates)
+        if (!this.isProcessingAllPages) {
+            this.recomputeMatches();
+        }
     };
 
     private recomputeMatches = () => {
@@ -233,15 +255,216 @@ class PdfViewerStore {
         }
     };
 
+    private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+    private hasProcessedAllPagesForCurrentSearch = false;
+
     setSearchTerm = (value: string) => {
+        const searchTermChanged = this.searchTerm !== value;
         this.searchTerm = value;
         this.setSubmittedSearchTerm(value);
-        this.recomputeMatches();
+
+        // If search term changed significantly, reset the processed flag
+        if (searchTermChanged) {
+            this.hasProcessedAllPagesForCurrentSearch = false;
+        }
+
+        // Clear any pending debounce
+        if (this.searchDebounceTimer) {
+            clearTimeout(this.searchDebounceTimer);
+            this.searchDebounceTimer = null;
+        }
+
+        if (value.trim()) {
+            // Immediately recompute with pages we already have
+            this.recomputeMatches();
+
+            // Then process all pages in the background to get accurate total match count
+            // Use debounce to avoid processing on every keystroke
+            // But process immediately if we haven't processed for this search term yet
+            const shouldProcessImmediately = !this.hasProcessedAllPagesForCurrentSearch && !this.isProcessingAllPages;
+
+            if (shouldProcessImmediately) {
+                console.log("setSearchTerm: Processing immediately (first time for this term)");
+                this.processAllPagesForSearch().then(() => {
+                    this.hasProcessedAllPagesForCurrentSearch = true;
+                });
+            } else {
+                this.searchDebounceTimer = setTimeout(async () => {
+                    console.log("Debounce timer fired", {
+                        currentSearchTerm: this.searchTerm,
+                        originalValue: value,
+                        isProcessing: this.isProcessingAllPages,
+                    });
+                    if (this.searchTerm === value && value.trim() && !this.isProcessingAllPages) {
+                        await this.processAllPagesForSearch();
+                        this.hasProcessedAllPagesForCurrentSearch = true;
+                    }
+                }, 300);
+            }
+        } else {
+            // Clear search immediately if term is empty
+            this.recomputeMatches();
+            this.hasProcessedAllPagesForCurrentSearch = false;
+        }
     };
 
-    submitSearch = () => {
+    submitSearch = async () => {
+        // Clear debounce timer
+        if (this.searchDebounceTimer) {
+            clearTimeout(this.searchDebounceTimer);
+            this.searchDebounceTimer = null;
+        }
+
         this.setSubmittedSearchTerm(this.searchTerm);
-        this.recomputeMatches();
+        if (this.searchTerm.trim()) {
+            // Immediately recompute with pages we already have
+            this.recomputeMatches();
+            // Then process all pages in background immediately (no debounce for explicit submit)
+            if (!this.isProcessingAllPages) {
+                console.log("submitSearch: Starting background processing");
+                await this.processAllPagesForSearch();
+            } else {
+                console.log("submitSearch: Already processing, skipping");
+            }
+        } else {
+            this.recomputeMatches();
+        }
+    };
+
+    /**
+     * Processes all pages in the background using pdfjs directly (without rendering)
+     * to extract text and compute matches across all pages
+     */
+    private processAllPagesForSearch = async () => {
+        if (!this.fileData || !this.totalDocumentPages || !this.submittedSearchTerm.trim()) {
+            console.log("processAllPagesForSearch: Early return", {
+                hasFileData: !!this.fileData,
+                totalPages: this.totalDocumentPages,
+                searchTerm: this.submittedSearchTerm,
+            });
+            return;
+        }
+
+        console.log("processAllPagesForSearch: Starting", {
+            totalPages: this.totalDocumentPages,
+            pagesWithText: Object.keys(this.pageJoinedTexts).length,
+        });
+
+        this.isProcessingAllPages = true;
+
+        try {
+            // Ensure pdfjs worker is configured (it should be set globally in PdfViewerClient)
+            // If not configured, try to set it
+            if (typeof window !== "undefined" && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
+                const workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+                pdfjsLib.GlobalWorkerOptions.workerSrc = workerSrc;
+                console.log("processAllPagesForSearch: Configured pdfjs worker");
+            }
+
+            // Convert data URL to ArrayBuffer for pdfjs
+            const response = await fetch(this.fileData);
+            const arrayBuffer = await response.arrayBuffer();
+
+            // Load the PDF document using pdfjs directly
+            const loadingTask = pdfjsLib.getDocument({
+                data: arrayBuffer,
+                useSystemFonts: true,
+            });
+
+            const pdfDocument = await loadingTask.promise;
+            const totalPages = pdfDocument.numPages;
+            console.log("processAllPagesForSearch: Loaded PDF, total pages:", totalPages);
+
+            // Process all pages that don't have text yet
+            const pagePromises: Promise<void>[] = [];
+            for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+                // Skip if we already have text for this page (from rendered page)
+                // But we still need to include it in match calculation
+                if (this.pageJoinedTexts[pageNum]) {
+                    // This page already has text, so it will be included in recomputeMatches
+                    // We just need to make sure recomputeMatches runs after we process other pages
+                    continue;
+                }
+
+                pagePromises.push(
+                    (async () => {
+                        try {
+                            const page = await pdfDocument.getPage(pageNum);
+                            const textContent = await page.getTextContent();
+
+                            const rawItems = textContent.items;
+                            if (!Array.isArray(rawItems)) {
+                                return;
+                            }
+
+                            const typedItems = rawItems as Array<{ str?: string }>;
+                            const textArray = typedItems.map((item) => item.str ?? "");
+
+                            const itemRanges: ItemRange[] = [];
+                            let currentPos = 0;
+                            const joinedParts: string[] = [];
+
+                            textArray.forEach((text, idx) => {
+                                const start = currentPos;
+                                joinedParts.push(text);
+                                currentPos += text.length;
+                                const end = currentPos;
+                                itemRanges.push({ start, end });
+                                if (idx < textArray.length - 1) {
+                                    currentPos += 1; // space separator
+                                }
+                            });
+
+                            const joinedText = joinedParts.join(" ");
+
+                            // Update store with extracted text
+                            this.setPageTexts({
+                                ...this.pageTexts,
+                                [pageNum]: textArray,
+                            });
+
+                            this.setPageJoinedTexts({
+                                ...this.pageJoinedTexts,
+                                [pageNum]: joinedText,
+                            });
+
+                            this.setPageTextItemRanges({
+                                ...this.pageTextItemRanges,
+                                [pageNum]: itemRanges,
+                            });
+
+                            // Don't recompute matches after each page - wait until all pages are processed
+                        } catch (err) {
+                            console.warn(`Error processing page ${pageNum}:`, err);
+                        }
+                    })()
+                );
+            }
+
+            console.log("processAllPagesForSearch: Processing", pagePromises.length, "pages");
+
+            // Process pages in batches to avoid overwhelming the browser
+            const batchSize = 5;
+            for (let i = 0; i < pagePromises.length; i += batchSize) {
+                const batch = pagePromises.slice(i, i + batchSize);
+                await Promise.all(batch);
+                console.log(`processAllPagesForSearch: Processed batch ${Math.floor(i / batchSize) + 1}, pages with text:`, Object.keys(this.pageJoinedTexts).length);
+            }
+
+            console.log("processAllPagesForSearch: Completed", {
+                pagesProcessed: pagePromises.length,
+                totalPagesWithText: Object.keys(this.pageJoinedTexts).length,
+                expectedTotalPages: totalPages,
+            });
+
+            // Final recompute to ensure all pages (including already-loaded ones) are included
+            this.recomputeMatches();
+            console.log("processAllPagesForSearch: Total matches after recompute:", this.totalMatches);
+        } catch (err) {
+            console.error("Error processing all pages for search:", err);
+        } finally {
+            this.isProcessingAllPages = false;
+        }
     };
 
     clearSearch = () => {
@@ -250,48 +473,90 @@ class PdfViewerStore {
         this.setPageMatches({});
         this.setPageMatchRanges({});
         this.setCurrentMatchIndex(null);
+        this.hasProcessedAllPagesForCurrentSearch = false;
+    };
+
+    /**
+     * Finds which page a given match index belongs to
+     * @param matchIndex - The global match index (0-based)
+     * @returns The page number (1-based) or null if not found
+     */
+    private getPageForMatchIndex = (matchIndex: number): number | null => {
+        if (matchIndex < 0 || !this.totalDocumentPages) return null;
+
+        let cumulativeMatches = 0;
+        for (let page = 1; page <= this.totalDocumentPages; page++) {
+            const matchesOnPage = this.pageMatches[page] || 0;
+            if (matchIndex < cumulativeMatches + matchesOnPage) {
+                return page;
+            }
+            cumulativeMatches += matchesOnPage;
+        }
+        return null;
     };
 
     nextMatch = () => {
         if (!this.totalMatches) return;
         if (this.currentMatchIndex === null) {
             this.setCurrentMatchIndex(0);
+            const page = this.getPageForMatchIndex(0);
+            if (page) this.setCurrentPage(page);
             return;
         }
-        this.setCurrentMatchIndex(
-            (this.currentMatchIndex + 1) % this.totalMatches,
-        );
+        const nextIndex = (this.currentMatchIndex + 1) % this.totalMatches;
+        this.setCurrentMatchIndex(nextIndex);
+        const page = this.getPageForMatchIndex(nextIndex);
+        if (page && page !== this.currentPage) {
+            this.setCurrentPage(page);
+        }
     };
 
     prevMatch = () => {
         if (!this.totalMatches) return;
         if (this.currentMatchIndex === null) {
-            this.setCurrentMatchIndex(this.totalMatches - 1);
+            const prevIndex = this.totalMatches - 1;
+            this.setCurrentMatchIndex(prevIndex);
+            const page = this.getPageForMatchIndex(prevIndex);
+            if (page) this.setCurrentPage(page);
             return;
         }
-        this.setCurrentMatchIndex(
-            (this.currentMatchIndex - 1 + this.totalMatches) % this.totalMatches,
-        );
+        const prevIndex = (this.currentMatchIndex - 1 + this.totalMatches) % this.totalMatches;
+        this.setCurrentMatchIndex(prevIndex);
+        const page = this.getPageForMatchIndex(prevIndex);
+        if (page && page !== this.currentPage) {
+            this.setCurrentPage(page);
+        }
     };
 
     scrollCurrentMatchIntoView = (container: HTMLDivElement | null) => {
         if (this.currentMatchIndex === null || this.totalMatches === 0) return;
         if (!container) return;
 
-        // Delay slightly to give pdf.js text layer time to render
+        // Delay to give pdf.js text layer time to render, especially when navigating to a new page
         window.setTimeout(() => {
             const el = container.querySelector<HTMLElement>(
                 `[data-match-idx="${this.currentMatchIndex}"]`,
             );
-            if (!el) return;
+            if (!el) {
+                // If element not found, retry once more after a longer delay (page might still be rendering)
+                window.setTimeout(() => {
+                    const retryEl = container.querySelector<HTMLElement>(
+                        `[data-match-idx="${this.currentMatchIndex}"]`,
+                    );
+                    if (retryEl) {
+                        retryEl.scrollIntoView({
+                            behavior: "smooth",
+                            block: "center",
+                        });
+                    }
+                }, 200);
+                return;
+            }
 
             el.scrollIntoView({
                 behavior: "smooth",
                 block: "center",
             });
-        }, 50);
+        }, 100);
     };
 }
-
-export const pdfViewerStore = new PdfViewerStore();
-
