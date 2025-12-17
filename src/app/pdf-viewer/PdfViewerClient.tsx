@@ -7,6 +7,13 @@ import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import { PdfViewerToolbar } from "./PdfViewerToolbar";
 import { usePdfViewerStore } from "@/stores/RootStoreProvider";
+import type { OverlappingMatch } from "./pdfViewerStore";
+
+// Constants
+const MIN_PAGE_WIDTH = 300;
+const MAX_PAGE_WIDTH = 800;
+const PAGE_PADDING = 32;
+const DEFAULT_PAGE_WIDTH = 600;
 
 // Configure pdfjs worker (required by react-pdf)
 if (typeof window !== "undefined") {
@@ -30,32 +37,38 @@ function PdfViewer({ file }: Props) {
         submittedSearchTerm,
         pageTextItemRanges,
         pageMatchRanges,
-        pageMatches,
         fetchPdf,
         handleDocumentLoadSuccess,
         scrollCurrentMatchIntoView,
-        setError,
         handlePageTextSuccess,
+        findOverlappingMatches,
+        handleDocumentLoadError,
     } = usePdfViewerStore();
 
     const viewerRef = useRef<HTMLDivElement | null>(null);
+    const [pageWidth, setPageWidth] = useState<number | undefined>(DEFAULT_PAGE_WIDTH);
 
-    const [pageWidth, setPageWidth] = useState<number | undefined>(600);
-
-    // Initialise store and start fetching PDF based on URL
+    // Initialize store and start fetching PDF based on URL
     useEffect(() => {
         fetchPdf(file);
-    }, []);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [file]);
 
     // Auto-fit width when container resizes
     useEffect(() => {
         const el = viewerRef.current;
         if (!el) return;
-        const observer = new ResizeObserver(() => {
-            const w = el.clientWidth;
-            // Provide some padding margin
-            setPageWidth(Math.max(300, Math.min(w - 32, 800)));
-        });
+
+        const updatePageWidth = () => {
+            const containerWidth = el.clientWidth;
+            const calculatedWidth = Math.max(
+                MIN_PAGE_WIDTH,
+                Math.min(containerWidth - PAGE_PADDING, MAX_PAGE_WIDTH)
+            );
+            setPageWidth(calculatedWidth);
+        };
+
+        const observer = new ResizeObserver(updatePageWidth);
         observer.observe(el);
         return () => observer.disconnect();
     }, []);
@@ -63,24 +76,18 @@ function PdfViewer({ file }: Props) {
     // Scroll the current match into view inside the PDF container when it changes
     useEffect(() => {
         scrollCurrentMatchIntoView(viewerRef.current);
-    }, [currentMatchIndex, totalMatches, currentPage]);
+    }, [currentMatchIndex, totalMatches, currentPage, scrollCurrentMatchIntoView]);
 
-    // Note: this stays in the React component (and not in the MobX store)
-    // because it is a pure view concern, tightly coupled to react-pdf's
-    // rendering cycle and the DOM:
-    // - it returns the customTextRenderer function that Page expects
-    // - it relies on a per-render closure variable (itemIndex) that must reset
-    //   on each React render of the page
-    // - it turns store data (match ranges) into HTML/markup and data attributes.
-    // The store remains UI-agnostic and only exposes computed state such as
-    // pageTextItemRanges, pageMatchRanges, and currentMatchIndex; this function
-    // consumes that state to decide *how* to highlight text.
+    /**
+     * Creates a text renderer function for highlighting search matches.
+     * This stays in the React component (not in the MobX store) because it is a pure view concern,
+     * tightly coupled to react-pdf's rendering cycle and the DOM.
+     */
     const createTextRenderer = (pageNumber: number) => {
         let itemIndex = 0;
 
         return ({ str }: { str: string }) => {
-            const term = submittedSearchTerm.trim();
-            if (!term) {
+            if (!submittedSearchTerm.trim()) {
                 itemIndex++;
                 return str;
             }
@@ -94,79 +101,64 @@ function PdfViewer({ file }: Props) {
                 return str;
             }
 
-            const overlappingMatches: Array<{
-                matchStart: number;
-                matchEnd: number;
-                localStart: number;
-                localEnd: number;
-                globalIndex: number;
-            }> = [];
-
-            let matchCounter = 0;
-            for (let p = 1; p < pageNumber; p++) {
-                matchCounter += pageMatches[p] || 0;
-            }
-
-            matchRanges.forEach((matchRange, idx) => {
-                const overlapStart = Math.max(
-                    matchRange.start,
-                    currentItemRange.start,
-                );
-                const overlapEnd = Math.min(matchRange.end, currentItemRange.end);
-
-                if (overlapStart < overlapEnd) {
-                    const localStart = Math.max(
-                        0,
-                        matchRange.start - currentItemRange.start,
-                    );
-                    const localEnd = Math.min(
-                        str.length,
-                        matchRange.end - currentItemRange.start,
-                    );
-
-                    overlappingMatches.push({
-                        matchStart: matchRange.start,
-                        matchEnd: matchRange.end,
-                        localStart,
-                        localEnd,
-                        globalIndex: matchCounter + idx,
-                    });
-                }
-            });
+            const overlappingMatches = findOverlappingMatches(
+                pageNumber,
+                matchRanges,
+                currentItemRange,
+                str.length
+            );
 
             if (overlappingMatches.length === 0) {
                 itemIndex++;
                 return str;
             }
 
-            overlappingMatches.sort((a, b) => a.localStart - b.localStart);
-
-            let result = "";
-            let lastIndex = 0;
-
-            overlappingMatches.forEach((match) => {
-                if (match.localStart > lastIndex) {
-                    result += str.substring(lastIndex, match.localStart);
-                }
-
-                const matchText = str.substring(match.localStart, match.localEnd);
-                const isCurrent = currentMatchIndex === match.globalIndex;
-                const baseStyle = "color: black;";
-                const bgStyle = isCurrent
-                    ? "background-color: #3b82f6; color: white;"
-                    : "background-color: yellow; color: black;";
-
-                result += `<span data-match-idx="${match.globalIndex}" style="${baseStyle} ${bgStyle}">${matchText}</span>`;
-                lastIndex = match.localEnd;
-            });
-
-            if (lastIndex < str.length) {
-                result += str.substring(lastIndex);
-            }
-
+            const result = renderHighlightedText(str, overlappingMatches);
             itemIndex++;
             return result;
         };
+    };
+
+
+    /**
+     * Renders text with highlighted matches
+     */
+    const renderHighlightedText = (
+        str: string,
+        overlappingMatches: OverlappingMatch[]
+    ): string => {
+        let result = "";
+        let lastIndex = 0;
+
+        overlappingMatches.forEach((match) => {
+            if (match.localStart > lastIndex) {
+                result += str.substring(lastIndex, match.localStart);
+            }
+
+            const matchText = str.substring(match.localStart, match.localEnd);
+            const isCurrent = currentMatchIndex === match.globalIndex;
+            const highlightStyle = getHighlightStyle(isCurrent);
+
+            result += `<span data-match-idx="${match.globalIndex}" style="${highlightStyle}">${matchText}</span>`;
+            lastIndex = match.localEnd;
+        });
+
+        if (lastIndex < str.length) {
+            result += str.substring(lastIndex);
+        }
+
+        return result;
+    };
+
+    /**
+     * Returns the CSS style for highlighting based on whether it's the current match
+     */
+    const getHighlightStyle = (isCurrent: boolean): string => {
+        const baseStyle = "color: black;";
+        const bgStyle = isCurrent
+            ? "background-color: #3b82f6; color: white;"
+            : "background-color: yellow; color: black;";
+        return `${baseStyle} ${bgStyle}`;
     };
 
     return (
@@ -177,9 +169,7 @@ function PdfViewer({ file }: Props) {
 
 
             <main className="mx-auto mt-4 flex w-full max-w-4xl flex-1 flex-col items-center justify-start gap-4">
-                {isLoading && (
-                    <p>Loading...</p>
-                )}
+                {isLoading && <p>Loading...</p>}
 
                 {error && (
                     <div className="mt-8 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -196,14 +186,7 @@ function PdfViewer({ file }: Props) {
                         <Document
                             file={fileData}
                             onLoadSuccess={handleDocumentLoadSuccess}
-                            onLoadError={(err) => {
-                                console.error(err);
-                                setError(
-                                    err instanceof Error
-                                        ? err.message
-                                        : "Error loading PDF for display.",
-                                );
-                            }}
+                            onLoadError={handleDocumentLoadError}
                         >
                             <Page
                                 key={`page_${currentPage}-${submittedSearchTerm}`}
@@ -212,13 +195,9 @@ function PdfViewer({ file }: Props) {
                                 scale={scale}
                                 customTextRenderer={createTextRenderer(currentPage)}
                                 onGetTextSuccess={(items) =>
-                                    handlePageTextSuccess(
-                                        currentPage,
-                                        items,
-                                    )
+                                    handlePageTextSuccess(currentPage, items)
                                 }
                             />
-
                         </Document>
                     </div>
                 )}
